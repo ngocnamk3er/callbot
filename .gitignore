@@ -1,0 +1,4 @@
+.env 
+.venv
+twilio_2FA_recovery_code.txt
+__pycache__

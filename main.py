@@ -7,6 +7,13 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 import uvicorn
+from dotenv import load_dotenv
+load_dotenv()
+from pydub import AudioSegment
+import io
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+DEEPGRAM_API_KEY   = os.getenv("DEEPGRAM_API_KEY")
 
 app = FastAPI()
 
@@ -14,7 +21,7 @@ app = FastAPI()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "your_openrouter_key")
 DEEPGRAM_API_KEY   = os.getenv("DEEPGRAM_API_KEY", "your_deepgram_key")
 
-OPENROUTER_MODEL   = "mistralai/mistral-7b-instruct:free"  # free model on OpenRouter
+OPENROUTER_MODEL   = "openai/gpt-4o-mini"  # free model on OpenRouter
 SYSTEM_PROMPT = """You are a friendly English conversation partner on a phone call.
 Keep responses SHORT (1-3 sentences max) since this is a voice call.
 Be natural, warm, and engaging. Ask follow-up questions to keep conversation flowing.
@@ -68,7 +75,8 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                 audio_buffer.extend(chunk)
 
                 # Process every ~1.5 seconds of audio (~12000 bytes at 8kHz mulaw)
-                if len(audio_buffer) >= 12000:
+                if len(audio_buffer) >= 36000:
+                    print("Processing audio...")
                     audio_data = bytes(audio_buffer)
                     audio_buffer.clear()
 
@@ -167,6 +175,8 @@ async def text_to_speech(text: str) -> bytes | None:
                 params=params,
                 headers={"User-Agent": "Mozilla/5.0"},
             )
+            print(f"TTS status: {resp.status_code}")  # thêm
+            print(f"TTS size: {len(resp.content)} bytes")  # thêm
             if resp.status_code == 200:
                 return resp.content
     except Exception as e:
@@ -176,12 +186,23 @@ async def text_to_speech(text: str) -> bytes | None:
 
 # ─── SEND AUDIO BACK TO TWILIO ────────────────────────────────────────────────
 async def send_audio_to_twilio(websocket: WebSocket, stream_sid: str, audio_bytes: bytes):
-    """Encode audio as base64 and send back through Twilio media stream."""
-    # Twilio expects mulaw 8kHz — Google TTS returns mp3
-    # For production, convert with ffmpeg. For now send as-is for demo.
-    chunk_size = 3200  # ~200ms chunks
-    for i in range(0, len(audio_bytes), chunk_size):
-        chunk = audio_bytes[i:i+chunk_size]
+    try:
+        # Convert MP3 → mulaw 8kHz
+        mp3_buf = io.BytesIO(audio_bytes)
+        audio = AudioSegment.from_mp3(mp3_buf)
+        audio = audio.set_frame_rate(8000).set_channels(1).set_sample_width(1)
+        
+        mulaw_buf = io.BytesIO()
+        audio.export(mulaw_buf, format="mulaw")
+        mulaw_bytes = mulaw_buf.getvalue()
+        print(f"Converted to mulaw: {len(mulaw_bytes)} bytes")
+    except Exception as e:
+        print(f"Convert error: {e}")
+        return
+
+    chunk_size = 3200
+    for i in range(0, len(mulaw_bytes), chunk_size):
+        chunk = mulaw_bytes[i:i+chunk_size]
         payload = base64.b64encode(chunk).decode("utf-8")
         await websocket.send_text(json.dumps({
             "event": "media",
